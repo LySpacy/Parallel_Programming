@@ -11,14 +11,31 @@ public class RequestProcessor(INetworkAdapter networkAdapter) : IRequestProcesso
 
     public async Task<Response> SendAsync(Request request, CancellationToken cancellationToken)
     {
-        if (!_runInProgress)
+        if (_runInProgress)
         {
             var taskCompletionSource = new TaskCompletionSource<Response>();
-            _tasksRequest.Add(request.Id, taskCompletionSource);
-        
-            await networkAdapter.WriteAsync(request, cancellationToken);
-        
-            return await taskCompletionSource.Task;
+
+            _tasksRequest[request.Id] = taskCompletionSource; 
+            
+            try
+            {
+                await networkAdapter.WriteAsync(request, cancellationToken);
+                return await taskCompletionSource.Task.WaitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                taskCompletionSource.TrySetCanceled();
+                throw; 
+            }
+            catch (Exception)
+            {
+                taskCompletionSource.TrySetException(new TaskCanceledException());
+                throw;
+            }
+            finally
+            {
+                _tasksRequest.Remove(request.Id); 
+            }
         }
         else
         {
@@ -62,9 +79,10 @@ public class RequestProcessor(INetworkAdapter networkAdapter) : IRequestProcesso
         }
         finally
         {
-            foreach (var task in _tasksRequest.Values)
+            foreach (var task in _tasksRequest)
             {
-                task.TrySetCanceled();
+                task.Value.TrySetCanceled();
+                _tasksRequest.Remove(task.Key);
             }
 
             _runInProgress = false;
